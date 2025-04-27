@@ -1,64 +1,59 @@
 #![no_std]
 #![no_main]
 
-use embedded_graphics::primitives::PrimitiveStyle;
-use embedded_graphics::primitives::PrimitiveStyleBuilder;
-use embedded_time::rate::Extensions;
+mod graph;
+mod margin;
 
-// The macro for our start-up function
-use rp_pico::entry;
-
-// GPIO traits
+use embedded_graphics::{
+    mono_font::{ascii::FONT_10X20, iso_8859_15::FONT_5X7, MonoTextStyle},
+    pixelcolor::BinaryColor,
+    prelude::*,
+    primitives::{Circle, PrimitiveStyle},
+    text::Text,
+};
 use embedded_hal::digital::v2::OutputPin;
+use embedded_layout::{
+    layout::linear::{spacing::DistributeFill, FixedMargin, LinearLayout},
+    prelude::{horizontal, vertical, Align, Chain},
+};
+use embedded_plots::curve::PlotPoint;
+use graph::MoisturePlot;
+
+// fixed capacity `std::Vec`
+use heapless::Vec;
+use rp_pico::{entry, hal};
+
+use epd_waveshare::{
+    color::*, epd2in13_v2::Display2in13 as EPDisplay, epd2in13_v2::Epd2in13 as EPD,
+    graphics::DisplayRotation, prelude::*,
+};
+
+use rp_pico::hal::{
+    clocks::{init_clocks_and_plls, Clock},
+    pac,
+    sio::Sio,
+    spi,
+    watchdog::Watchdog,
+};
 
 // Ensure we halt the program on panic (if we don't mention this crate it won't
 // be linked)
 use panic_halt as _;
 
-// Pull in any important traits
-use rp_pico::hal::prelude::*;
+// const WET: u32 = 240;
+// const DRY: u32 = 584;
 
-// A shorter alias for the Peripheral Access Crate, which provides low-level
-// register access
-use rp_pico::hal::pac;
-
-// A shorter alias for the Hardware Abstraction Layer, which provides
-// higher-level drivers.
-use rp_pico::hal;
-
-// The graphics library we'll use to draw to the screen
-use embedded_graphics::{
-    pixelcolor::BinaryColor,
-    prelude::*,
-    primitives::Line,
-    text::{Text, TextStyleBuilder},
-};
-
-use epd_waveshare::{
-    color::*, epd2in13_v2::Display2in13 as EPDisplay, epd2in13_v2::Epd2in13 as EPD,
-    epd2in13_v2::HEIGHT, epd2in13_v2::WIDTH, graphics::DisplayRotation, prelude::*,
-};
-
-/// Entry point to our bare-metal application.
-///
-/// The `#[entry]` macro ensures the Cortex-M start-up code calls this function
-/// as soon as all global variables are initialised.
-///
-/// The function configures the RP2040 peripherals, then blinks the LED in an
-/// infinite loop.
 #[entry]
-fn entry() -> ! {
-    // Grab our singleton objects
+fn main() -> ! {
+    // Start all the peripherals
     let mut pac = pac::Peripherals::take().unwrap();
     let core = pac::CorePeripherals::take().unwrap();
 
     // Set up the watchdog driver - needed by the clock setup code
-    let mut watchdog = hal::Watchdog::new(pac.WATCHDOG);
+    let mut watchdog = Watchdog::new(pac.WATCHDOG);
 
-    // Configure the clocks
-    //
-    // The default is to generate a 125 MHz system clock
-    let clocks = hal::clocks::init_clocks_and_plls(
+    // Set up the watchdog driver - needed by the clock setup code
+    let clocks = init_clocks_and_plls(
         rp_pico::XOSC_CRYSTAL_FREQ,
         pac.XOSC,
         pac.CLOCKS,
@@ -75,10 +70,10 @@ fn entry() -> ! {
     let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
 
     // The single-cycle I/O block controls our GPIO pins
-    let sio = hal::Sio::new(pac.SIO);
+    let sio = Sio::new(pac.SIO);
 
     // Set the pins up according to their function on this particular board
-    let pins = rp_pico::Pins::new(
+    let pins = hal::gpio::Pins::new(
         pac.IO_BANK0,
         pac.PADS_BANK0,
         sio.gpio_bank0,
@@ -88,16 +83,13 @@ fn entry() -> ! {
     // SPI declaration
     let _spi_sclk = pins.gpio10.into_mode::<hal::gpio::FunctionSpi>();
     let _spi_mosi = pins.gpio11.into_mode::<hal::gpio::FunctionSpi>();
-    let spi = hal::spi::Spi::<_, _, 8>::new(pac.SPI1);
-
+    let spi = spi::Spi::<_, _, 8>::new(pac.SPI1);
     let mut spi = spi.init(
         &mut pac.RESETS,
         clocks.peripheral_clock.freq(),
-        // you can put cookie (increase the speed) in it but I don't recommend it.
-        4_000_000u32.Hz().into(),
+        fugit::RateExtU32::Hz(16_000_000u32),
         &embedded_hal::spi::MODE_0,
     );
-    // End of SPI declaration
 
     // Start the rest of pins needed to communicate with the screen
     let mut cs = pins.gpio9.into_push_pull_output(); // CS
@@ -116,70 +108,109 @@ fn entry() -> ! {
         &mut delay, // DELAY
     )
     .unwrap();
-    // Start the display buffer
-    let mut display = EPDisplay::default();
 
     epd.wake_up(&mut spi, &mut delay).unwrap();
-    // epd.set_background_color(epd_waveshare::color::Color::Black);
-    // epd.clear_frame(&mut spi).unwrap();
-    // epd.set_background_color(epd_waveshare::color::Color::White);
     epd.clear_frame(&mut spi, &mut delay).unwrap();
 
-    display.clear_buffer(Color::Black);
+    // Start the display buffer
+    let mut display = EPDisplay::default();
+    display.clear_buffer(Color::White);
+    display.set_rotation(DisplayRotation::Rotate90);
 
-    // Start the fun
-    let style_text = TextStyleBuilder::new()
-        // .text_color(BinaryColor::Off)
-        // .background_color(BinaryColor::On)
-        .build();
-    let style_forms = PrimitiveStyleBuilder::new()
-        .stroke_width(10)
-        .stroke_color(BinaryColor::Off)
-        .fill_color(BinaryColor::Off)
-        .build();
+    let display_area = display.bounding_box();
 
-    for i in 0..(WIDTH / 10) as i32 {
-        Line::new(Point::new(i * 10, 0), Point::new(i * 10, HEIGHT as i32))
-            .into_styled(PrimitiveStyle::with_stroke(BinaryColor::Off, 1))
-            .draw(&mut display)
-            .unwrap();
-    }
-    for i in 0..(HEIGHT / 10) as i32 {
-        Line::new(Point::new(0, i * 10), Point::new(WIDTH as i32, i * 10))
-            .into_styled(PrimitiveStyle::with_stroke(BinaryColor::Off, 1))
-            .draw(&mut display)
-            .unwrap();
-    }
+    let thin_stroke = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
+    let height = display_area.size.height;
+    let width = display_area.size.width;
+    let half_height = height / 2;
+    let half_width = width / 2;
 
-    display.set_rotation(DisplayRotation::Rotate270);
+    let circle = Circle::new(Point::zero(), 11).into_styled(thin_stroke);
+    let device_name = Text::new(
+        "Sparticus",
+        Point::zero(),
+        MonoTextStyle::new(&FONT_10X20, BinaryColor::On),
+    );
+    let date = Text::new(
+        "Tue, 11",
+        Point::zero(),
+        MonoTextStyle::new(&FONT_5X7, BinaryColor::On),
+    );
+    let status = Text::new(
+        "Status:",
+        Point::zero(),
+        MonoTextStyle::new(&FONT_10X20, BinaryColor::On),
+    );
+    let watering_can = Circle::new(Point::zero(), 11).into_styled(thin_stroke);
+    let last_watering = Text::new(
+        "last 12/23/2019",
+        Point::zero(),
+        MonoTextStyle::new(&FONT_5X7, BinaryColor::On),
+    );
 
-    // If you want to show an image, you can use BMP or TGA
-    // let tga = Tga::from_slice(include_bytes!(concat!(
-    //     env!("CARGO_MANIFEST_DIR"),
-    //     "/RustMX.tga"
-    // )))
-    // .unwrap();
+    let header = LinearLayout::vertical(Chain::new(device_name).append(date))
+        .with_alignment(horizontal::Left)
+        .with_spacing(FixedMargin(4))
+        .arrange();
+    let watering_status = LinearLayout::horizontal(Chain::new(status).append(watering_can))
+        .with_spacing(FixedMargin(8))
+        .arrange();
+    let watering_status_and_last =
+        LinearLayout::vertical(Chain::new(watering_status).append(last_watering))
+            .with_alignment(horizontal::Right)
+            .with_spacing(FixedMargin(4))
+            .arrange();
+    let mut data: Vec<PlotPoint, 4> = Vec::new();
 
-    // let image: Image<Tga, BinaryColor> = Image::new(&tga, Point::new(50, 100));
-    // image.draw(&mut display).unwrap();
+    data.push(PlotPoint { x: 0, y: 0 });
+    data.push(PlotPoint { x: 1, y: 2 });
+    data.push(PlotPoint { x: 2, y: 2 });
+    data.push(PlotPoint { x: 3, y: 0 });
 
-    Text::new("RustMX", Point::new(50, 50), style_text)
+    let plot = MoisturePlot::new(&data, Point::zero(), Size::new(half_width, half_height));
+    let left = LinearLayout::vertical(Chain::new(header).append(plot))
+        .with_spacing(DistributeFill(height))
+        .arrange();
+    let right = LinearLayout::vertical(Chain::new(watering_status_and_last).append(circle))
+        .with_spacing(DistributeFill(height))
+        .arrange();
+
+    LinearLayout::horizontal(Chain::new(left).append(right))
+        .align_to(
+            &display_area,
+            horizontal::NoAlignment,
+            vertical::NoAlignment,
+        )
+        .with_spacing(DistributeFill(width))
+        .arrange()
         .draw(&mut display)
         .unwrap();
 
-    epd.update_frame(&mut spi, display.buffer(), &mut delay)
+    // Update the display with what we have
+    epd.update_and_display_frame(&mut spi, display.buffer(), &mut delay)
         .unwrap();
-    epd.display_frame(&mut spi, &mut delay).unwrap();
-    delay.delay_ms(1000);
 
-    // Set the LED to be an output
-    let mut led_pin = pins.led.into_push_pull_output();
+    let temperature_pin = pins.gpio14.into_floating_input();
+    let conversion_factor = 3.3 / (1 << 12) as f32;
+    let mut led_pin = pins.gpio25.into_push_pull_output();
 
-    // Blink the LED at 1 Hz
+    // 26, 27 and 28 are ADC pins useful for the soil moisture sensor
+    // let soil_sensor = pins.gpio26.into_floating_input();
+
     loop {
+        // let temperature_reading = temperature_pin
         led_pin.set_high().unwrap();
-        delay.delay_ms(1000);
+        delay.delay_ms(500);
         led_pin.set_low().unwrap();
-        delay.delay_ms(1000);
+        delay.delay_ms(500);
     }
 }
+
+// let tga = Tga::from_slice(include_bytes!(concat!(
+//     env!("CARGO_MANIFEST_DIR"),
+//     "/RustMX.tga"
+// )))
+// .unwrap();
+
+// let image: Image<Tga, BinaryColor> = Image::new(&tga, Point::new(50, 100));
+// image.draw(&mut display).unwrap();
