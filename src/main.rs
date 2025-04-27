@@ -2,7 +2,6 @@
 #![no_main]
 
 mod graph;
-mod margin;
 
 use embedded_graphics::{
     mono_font::{ascii::FONT_10X20, iso_8859_15::FONT_5X7, MonoTextStyle},
@@ -19,7 +18,6 @@ use embedded_layout::{
 use embedded_plots::curve::PlotPoint;
 use graph::MoisturePlot;
 
-// fixed capacity `std::Vec`
 use heapless::Vec;
 use rp_pico::{entry, hal};
 
@@ -39,9 +37,6 @@ use rp_pico::hal::{
 // Ensure we halt the program on panic (if we don't mention this crate it won't
 // be linked)
 use panic_halt as _;
-
-// const WET: u32 = 240;
-// const DRY: u32 = 584;
 
 #[entry]
 fn main() -> ! {
@@ -127,7 +122,7 @@ fn main() -> ! {
 
     let circle = Circle::new(Point::zero(), 11).into_styled(thin_stroke);
     let device_name = Text::new(
-        "Sparticus",
+        "joe mama",
         Point::zero(),
         MonoTextStyle::new(&FONT_10X20, BinaryColor::On),
     );
@@ -162,10 +157,10 @@ fn main() -> ! {
             .arrange();
     let mut data: Vec<PlotPoint, 4> = Vec::new();
 
-    data.push(PlotPoint { x: 0, y: 0 });
-    data.push(PlotPoint { x: 1, y: 2 });
-    data.push(PlotPoint { x: 2, y: 2 });
-    data.push(PlotPoint { x: 3, y: 0 });
+    let _ = data.push(PlotPoint { x: 0, y: 0 });
+    let _ = data.push(PlotPoint { x: 1, y: 2 });
+    let _ = data.push(PlotPoint { x: 2, y: 2 });
+    let _ = data.push(PlotPoint { x: 3, y: 0 });
 
     let plot = MoisturePlot::new(&data, Point::zero(), Size::new(half_width, half_height));
     let left = LinearLayout::vertical(Chain::new(header).append(plot))
@@ -190,27 +185,12 @@ fn main() -> ! {
     epd.update_and_display_frame(&mut spi, display.buffer(), &mut delay)
         .unwrap();
 
-    let temperature_pin = pins.gpio14.into_floating_input();
-    let conversion_factor = 3.3 / (1 << 12) as f32;
     let mut led_pin = pins.gpio25.into_push_pull_output();
 
-    // 26, 27 and 28 are ADC pins useful for the soil moisture sensor
-    // let soil_sensor = pins.gpio26.into_floating_input();
-
     loop {
-        // let temperature_reading = temperature_pin
         led_pin.set_high().unwrap();
         delay.delay_ms(500);
         led_pin.set_low().unwrap();
         delay.delay_ms(500);
     }
 }
-
-// let tga = Tga::from_slice(include_bytes!(concat!(
-//     env!("CARGO_MANIFEST_DIR"),
-//     "/RustMX.tga"
-// )))
-// .unwrap();
-
-// let image: Image<Tga, BinaryColor> = Image::new(&tga, Point::new(50, 100));
-// image.draw(&mut display).unwrap();
